@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 
 export default function Dashboard() {
   const [wallet, setWallet] = useState('')
@@ -9,9 +9,19 @@ export default function Dashboard() {
     if (!wallet || wallet.length < 10) return
     setLoading(true)
     try {
-      const res = await fetch(`http://localhost:8000/api/miner/${wallet}`)
-      const data = await res.json()
-      setStats(data)
+      const [balanceRes, hashrateRes] = await Promise.all([
+        fetch(`http://localhost:8000/api/miner/${wallet}/balance`),
+        fetch(`http://localhost:8000/api/hashrate/${wallet}`)
+      ])
+      
+      const balanceData = await balanceRes.json()
+      const hashrateData = await hashrateRes.json()
+      
+      setStats({
+        ...balanceData,
+        hashrate: hashrateData.hashrate,
+        hashrate_unit: hashrateData.unit
+      })
     } catch (error) {
       console.error('Error:', error)
     }
@@ -50,19 +60,63 @@ export default function Dashboard() {
         </div>
 
         {stats && (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '24px' }}>
-            {[
-              { label: 'Current Balance', value: `${stats.balance} USDT`, icon: '💰', color: '#00E5FF' },
-              { label: 'Hashrate', value: `${stats.hashrate} H/s`, icon: '⚡', color: '#8B5CF6' },
-              { label: 'Active Workers', value: stats.workers, icon: '👷', color: '#10B981' },
-              { label: 'Est. Daily', value: `$${stats.estimated_daily}`, icon: '📊', color: '#F59E0B' }
-            ].map((item, index) => (
-              <div key={index} style={{ background: '#141825', border: '1px solid #374151', borderRadius: '12px', padding: '24px' }}>
-                <div style={{ fontSize: '32px', marginBottom: '8px' }}>{item.icon}</div>
-                <div style={{ color: '#9CA3AF', fontSize: '14px', marginBottom: '8px' }}>{item.label}</div>
-                <div style={{ color: item.color, fontSize: '28px', fontWeight: 'bold' }}>{item.value}</div>
+          <div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '24px', marginBottom: '32px' }}>
+              <div style={{ background: '#141825', border: '1px solid #374151', borderRadius: '12px', padding: '24px' }}>
+                <div style={{ fontSize: '32px', marginBottom: '8px' }}>💰</div>
+                <div style={{ color: '#9CA3AF', fontSize: '14px', marginBottom: '8px' }}>Current Balance</div>
+                <div style={{ color: '#00E5FF', fontSize: '28px', fontWeight: 'bold' }}>{stats.balance} USDT</div>
               </div>
-            ))}
+
+              <div style={{ background: '#141825', border: '1px solid #374151', borderRadius: '12px', padding: '24px' }}>
+                <div style={{ fontSize: '32px', marginBottom: '8px' }}>⚡</div>
+                <div style={{ color: '#9CA3AF', fontSize: '14px', marginBottom: '8px' }}>Hashrate</div>
+                <div style={{ color: '#8B5CF6', fontSize: '28px', fontWeight: 'bold' }}>
+                  {stats.hashrate || 0} {stats.hashrate_unit || 'H/s'}
+                </div>
+              </div>
+
+              <div style={{ background: '#141825', border: '1px solid #374151', borderRadius: '12px', padding: '24px' }}>
+                <div style={{ fontSize: '32px', marginBottom: '8px' }}>👷</div>
+                <div style={{ color: '#9CA3AF', fontSize: '14px', marginBottom: '8px' }}>Total Shares</div>
+                <div style={{ color: '#10B981', fontSize: '28px', fontWeight: 'bold' }}>{stats.total_shares || 0}</div>
+              </div>
+
+              <div style={{ background: '#141825', border: '1px solid #374151', borderRadius: '12px', padding: '24px' }}>
+                <div style={{ fontSize: '32px', marginBottom: '8px' }}>📊</div>
+                <div style={{ color: '#9CA3AF', fontSize: '14px', marginBottom: '8px' }}>Est. Daily</div>
+                <div style={{ color: '#F59E0B', fontSize: '28px', fontWeight: 'bold' }}>${stats.estimated_daily || 0}</div>
+              </div>
+            </div>
+
+            <div style={{ background: '#141825', border: '1px solid #374151', borderRadius: '16px', padding: '32px' }}>
+              <h2 style={{ fontSize: '24px', fontWeight: 'bold', color: 'white', marginBottom: '24px' }}>
+                Payout Information
+              </h2>
+              <div style={{ display: 'grid', gap: '16px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '16px', background: '#1E2330', borderRadius: '8px' }}>
+                  <span style={{ color: '#9CA3AF' }}>Minimum Payout</span>
+                  <span style={{ color: 'white', fontWeight: 'bold' }}>{stats.min_payout} USDT</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '16px', background: '#1E2330', borderRadius: '8px' }}>
+                  <span style={{ color: '#9CA3AF' }}>Network</span>
+                  <span style={{ color: 'white', fontWeight: 'bold' }}>{stats.network}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '16px', background: '#1E2330', borderRadius: '8px' }}>
+                  <span style={{ color: '#9CA3AF' }}>Progress to Payout</span>
+                  <span style={{ color: '#00E5FF', fontWeight: 'bold' }}>{stats.payout_progress}%</span>
+                </div>
+              </div>
+
+              <div style={{ marginTop: '24px', background: '#1E2330', borderRadius: '999px', height: '12px', overflow: 'hidden' }}>
+                <div style={{ 
+                  background: 'linear-gradient(90deg, #00E5FF, #00B8CC)', 
+                  height: '100%', 
+                  width: `${Math.min(stats.payout_progress, 100)}%`,
+                  transition: 'width 0.5s'
+                }} />
+              </div>
+            </div>
           </div>
         )}
 

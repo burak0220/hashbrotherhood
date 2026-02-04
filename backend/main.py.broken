@@ -30,18 +30,6 @@ async def root():
         "timestamp": datetime.now().isoformat()
     }
 
-@app.get("/health")
-async def health_check():
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1")
-        cursor.close()
-        conn.close()
-        return {"status": "healthy", "database": "connected"}
-    except:
-        return {"status": "unhealthy", "database": "disconnected"}
-
 @app.get("/api/algorithms")
 async def get_algorithms():
     conn = get_db()
@@ -133,42 +121,6 @@ async def get_miner_balance(wallet: str):
         "payout_progress": round((balance / 10.0) * 100, 1) if balance < 10 else 100.0
     }
 
-@app.get("/api/hashrate/{wallet}")
-async def get_miner_hashrate(wallet: str):
-    """Calculate hashrate from recent shares"""
-    conn = get_db()
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    
-    cursor.execute("""
-        SELECT difficulty, timestamp
-        FROM revenue_snapshots
-        WHERE miner_wallet = %s 
-        AND timestamp > NOW() - INTERVAL '5 minutes'
-        ORDER BY timestamp DESC
-    """, (wallet,))
-    
-    shares = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    
-    if not shares or len(shares) < 2:
-        return {"wallet": wallet, "hashrate": 0, "unit": "H/s"}
-    
-    total_difficulty = sum(float(s['difficulty']) for s in shares)
-    time_span = (shares[0]['timestamp'] - shares[-1]['timestamp']).total_seconds()
-    
-    if time_span > 0:
-        hashrate = total_difficulty / time_span
-    else:
-        hashrate = 0
-    
-    return {
-        "wallet": wallet,
-        "hashrate": round(hashrate, 2),
-        "unit": "H/s",
-        "shares_count": len(shares)
-    }
-
 @app.get("/api/payments/{wallet}")
 async def get_payments(wallet: str):
     conn = get_db()
@@ -198,6 +150,60 @@ async def get_miner_stats(wallet: str):
         "estimated_daily": 0.0,
         "min_payout": 10.0,
         "network": "BEP20"
+    }
+
+@app.get("/health")
+async def health_check():
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1")
+        cursor.close()
+        conn.close()
+        return {"status": "healthy", "database": "connected"}
+    except:
+        return {"status": "unhealthy", "database": "disconnected"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+@app.get("/api/hashrate/{wallet}")
+async def get_miner_hashrate(wallet: str):
+    """Calculate hashrate from recent shares"""
+    conn = get_db()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    # Get shares from last 5 minutes
+    cursor.execute("""
+        SELECT difficulty, timestamp
+        FROM revenue_snapshots
+        WHERE miner_wallet = %s 
+        AND timestamp > NOW() - INTERVAL '5 minutes'
+        ORDER BY timestamp DESC
+    """, (wallet,))
+    
+    shares = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    
+    if not shares or len(shares) < 2:
+        return {"wallet": wallet, "hashrate": 0, "unit": "H/s"}
+    
+    # Calculate average hashrate
+    total_difficulty = sum(float(s['difficulty']) for s in shares)
+    time_span = (shares[0]['timestamp'] - shares[-1]['timestamp']).total_seconds()
+    
+    if time_span > 0:
+        hashrate = total_difficulty / time_span
+    else:
+        hashrate = 0
+    
+    return {
+        "wallet": wallet,
+        "hashrate": round(hashrate, 2),
+        "unit": "H/s",
+        "shares_count": len(shares)
     }
 
 if __name__ == "__main__":
