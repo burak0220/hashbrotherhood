@@ -1,9 +1,19 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
 app = FastAPI(title="HashBrotherhood Admin API")
+
+# CORS Middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Database connection
 def get_db():
@@ -84,6 +94,61 @@ async def get_algorithms():
     conn.close()
     
     return {"algorithms": algos}
+
+@app.get("/admin/payments/pending")
+async def get_pending_payments():
+    """Get all pending payments"""
+    conn = get_db()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cursor.execute("""
+        SELECT id, miner_wallet, amount_usdt, status, created_at
+        FROM payments
+        WHERE status = 'pending'
+        ORDER BY created_at DESC
+    """)
+    
+    payments = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    
+    return {"payments": payments}
+
+@app.post("/admin/payment/{payment_id}/approve")
+async def approve_payment(payment_id: int):
+    """Approve a pending payment"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        UPDATE payments 
+        SET status = 'approved', approved_at = NOW()
+        WHERE id = %s
+    """, (payment_id,))
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+    
+    return {"message": "Payment approved", "payment_id": payment_id}
+
+@app.post("/admin/payment/{payment_id}/complete")
+async def complete_payment(payment_id: int, tx_hash: str):
+    """Mark payment as completed with TX hash"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        UPDATE payments 
+        SET status = 'paid', paid_at = NOW(), tx_hash = %s
+        WHERE id = %s
+    """, (tx_hash, payment_id))
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+    
+    return {"message": "Payment completed", "payment_id": payment_id, "tx_hash": tx_hash}
 
 if __name__ == "__main__":
     import uvicorn

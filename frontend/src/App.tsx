@@ -6,6 +6,7 @@ import Calculator from './pages/Calculator'
 import Dashboard from './pages/Dashboard'
 import Guide from './pages/Guide'
 import AlgorithmDetail from './pages/AlgorithmDetail'
+import AdminPanel from './pages/AdminPanel'
 
 function App() {
   return (
@@ -19,6 +20,7 @@ function App() {
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/guide" element={<Guide />} />
             <Route path="/mine/:algoName" element={<AlgorithmDetail />} />
+            <Route path="/admin" element={<AdminPanel />} />
           </Routes>
         </div>
         <Footer />

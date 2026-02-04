@@ -9,7 +9,8 @@ export default function Navigation() {
     { path: '/', label: 'Home', icon: '🏠' },
     { path: '/calculator', label: 'Calculator', icon: '🧮' },
     { path: '/dashboard', label: 'Dashboard', icon: '📊' },
-    { path: '/guide', label: 'Guide', icon: '📚' }
+    { path: '/guide', label: 'Guide', icon: '📚' },
+    { path: '/admin', label: 'Admin', icon: '⚙️' }
   ]
 
   return (
