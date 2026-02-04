@@ -18,4 +18,29 @@ code {
 .container {
   max-width: 1200px;
   margin: 0 auto;
+  padding: 0 16px;
+}
+
+/* Mobile Responsive */
+@media (max-width: 768px) {
+  h1 {
+    font-size: 32px !important;
+  }
+  
+  h2 {
+    font-size: 28px !important;
+  }
+  
+  h3 {
+    font-size: 20px !important;
+  }
+  
+  p {
+    font-size: 14px !important;
+  }
+  
+  button {
+    width: 100%;
+    padding: 12px !important;
+  }
 }
