@@ -84,7 +84,6 @@ async def get_algorithm(name: str):
 
 @app.get("/api/miner/{wallet}/balance")
 async def get_miner_balance(wallet: str):
-    """Get miner's current balance and stats"""
     conn = get_db()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     
@@ -135,7 +134,6 @@ async def get_miner_balance(wallet: str):
 
 @app.get("/api/hashrate/{wallet}")
 async def get_miner_hashrate(wallet: str):
-    """Calculate hashrate from recent shares"""
     conn = get_db()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     
@@ -167,6 +165,38 @@ async def get_miner_hashrate(wallet: str):
         "hashrate": round(hashrate, 2),
         "unit": "H/s",
         "shares_count": len(shares)
+    }
+
+@app.get("/api/workers/{wallet}")
+async def get_active_workers(wallet: str):
+    conn = get_db()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cursor.execute("""
+        SELECT 
+            worker_name,
+            COUNT(*) as shares,
+            MAX(timestamp) as last_share,
+            SUM(difficulty) as total_difficulty
+        FROM revenue_snapshots
+        WHERE miner_wallet = %s 
+        AND timestamp > NOW() - INTERVAL '10 minutes'
+        AND worker_name IS NOT NULL
+        GROUP BY worker_name
+        ORDER BY last_share DESC
+    """, (wallet,))
+    
+    workers = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    
+    active_count = len([w for w in workers if w['last_share'] and (datetime.now() - w['last_share']).seconds < 300])
+    
+    return {
+        "wallet": wallet,
+        "active_workers": active_count,
+        "total_workers": len(workers),
+        "workers": workers
     }
 
 @app.get("/api/payments/{wallet}")

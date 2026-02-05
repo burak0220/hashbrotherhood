@@ -3,25 +3,34 @@ import { useState } from 'react'
 export default function Dashboard() {
   const [wallet, setWallet] = useState('')
   const [stats, setStats] = useState<any>(null)
+  const [payments, setPayments] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
 
   const fetchStats = async () => {
     if (!wallet || wallet.length < 10) return
     setLoading(true)
     try {
-      const [balanceRes, hashrateRes] = await Promise.all([
+      const [balanceRes, hashrateRes, paymentsRes, workersRes] = await Promise.all([
         fetch(`http://localhost:8000/api/miner/${wallet}/balance`),
-        fetch(`http://localhost:8000/api/hashrate/${wallet}`)
+        fetch(`http://localhost:8000/api/hashrate/${wallet}`),
+        fetch(`http://localhost:8000/api/payments/${wallet}`),
+        fetch(`http://localhost:8000/api/workers/${wallet}`)
       ])
       
       const balanceData = await balanceRes.json()
       const hashrateData = await hashrateRes.json()
+      const paymentsData = await paymentsRes.json()
+      const workersData = await workersRes.json()
       
       setStats({
         ...balanceData,
         hashrate: hashrateData.hashrate,
-        hashrate_unit: hashrateData.unit
+        hashrate_unit: hashrateData.unit,
+        shares_count: hashrateData.shares_count || balanceData.total_shares,
+        active_workers: workersData.active_workers || 0
       })
+      
+      setPayments(paymentsData.payments || [])
     } catch (error) {
       console.error('Error:', error)
     }
@@ -78,18 +87,18 @@ export default function Dashboard() {
 
               <div style={{ background: '#141825', border: '1px solid #374151', borderRadius: '12px', padding: '24px' }}>
                 <div style={{ fontSize: '32px', marginBottom: '8px' }}>👷</div>
-                <div style={{ color: '#9CA3AF', fontSize: '14px', marginBottom: '8px' }}>Total Shares</div>
-                <div style={{ color: '#10B981', fontSize: '28px', fontWeight: 'bold' }}>{stats.total_shares || 0}</div>
+                <div style={{ color: '#9CA3AF', fontSize: '14px', marginBottom: '8px' }}>Active Workers</div>
+                <div style={{ color: '#10B981', fontSize: '28px', fontWeight: 'bold' }}>{stats.active_workers || 0}</div>
               </div>
 
               <div style={{ background: '#141825', border: '1px solid #374151', borderRadius: '12px', padding: '24px' }}>
                 <div style={{ fontSize: '32px', marginBottom: '8px' }}>📊</div>
-                <div style={{ color: '#9CA3AF', fontSize: '14px', marginBottom: '8px' }}>Est. Daily</div>
-                <div style={{ color: '#F59E0B', fontSize: '28px', fontWeight: 'bold' }}>${stats.estimated_daily || 0}</div>
+                <div style={{ color: '#9CA3AF', fontSize: '14px', marginBottom: '8px' }}>Total Shares</div>
+                <div style={{ color: '#F59E0B', fontSize: '28px', fontWeight: 'bold' }}>{stats.shares_count || 0}</div>
               </div>
             </div>
 
-            <div style={{ background: '#141825', border: '1px solid #374151', borderRadius: '16px', padding: '32px' }}>
+            <div style={{ background: '#141825', border: '1px solid #374151', borderRadius: '16px', padding: '32px', marginBottom: '32px' }}>
               <h2 style={{ fontSize: '24px', fontWeight: 'bold', color: 'white', marginBottom: '24px' }}>
                 Payout Information
               </h2>
@@ -106,6 +115,10 @@ export default function Dashboard() {
                   <span style={{ color: '#9CA3AF' }}>Progress to Payout</span>
                   <span style={{ color: '#00E5FF', fontWeight: 'bold' }}>{stats.payout_progress}%</span>
                 </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '16px', background: '#1E2330', borderRadius: '8px' }}>
+                  <span style={{ color: '#9CA3AF' }}>Total Paid</span>
+                  <span style={{ color: '#10B981', fontWeight: 'bold' }}>${stats.total_paid || 0} USDT</span>
+                </div>
               </div>
 
               <div style={{ marginTop: '24px', background: '#1E2330', borderRadius: '999px', height: '12px', overflow: 'hidden' }}>
@@ -117,6 +130,58 @@ export default function Dashboard() {
                 }} />
               </div>
             </div>
+
+            {payments.length > 0 && (
+              <div style={{ background: '#141825', border: '1px solid #374151', borderRadius: '16px', padding: '32px' }}>
+                <h2 style={{ fontSize: '24px', fontWeight: 'bold', color: 'white', marginBottom: '24px' }}>
+                  💳 Payment History
+                </h2>
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                    <thead>
+                      <tr style={{ borderBottom: '1px solid #374151' }}>
+                        <th style={{ padding: '16px', textAlign: 'left', color: '#9CA3AF', fontSize: '13px', fontWeight: '600' }}>DATE</th>
+                        <th style={{ padding: '16px', textAlign: 'left', color: '#9CA3AF', fontSize: '13px', fontWeight: '600' }}>AMOUNT</th>
+                        <th style={{ padding: '16px', textAlign: 'left', color: '#9CA3AF', fontSize: '13px', fontWeight: '600' }}>STATUS</th>
+                        <th style={{ padding: '16px', textAlign: 'left', color: '#9CA3AF', fontSize: '13px', fontWeight: '600' }}>TX HASH</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {payments.map(payment => (
+                        <tr key={payment.id} style={{ borderBottom: '1px solid #374151' }}>
+                          <td style={{ padding: '16px', color: '#9CA3AF', fontSize: '14px' }}>
+                            {new Date(payment.created_at).toLocaleDateString()}
+                          </td>
+                          <td style={{ padding: '16px', color: 'white', fontSize: '16px', fontWeight: 'bold' }}>
+                            ${payment.amount_usdt} USDT
+                          </td>
+                          <td style={{ padding: '16px' }}>
+                            <span style={{ 
+                              padding: '4px 12px', 
+                              background: payment.status === 'paid' ? 'rgba(16, 185, 129, 0.15)' : payment.status === 'approved' ? 'rgba(245, 158, 11, 0.15)' : 'rgba(139, 92, 246, 0.15)', 
+                              color: payment.status === 'paid' ? '#10B981' : payment.status === 'approved' ? '#F59E0B' : '#8B5CF6', 
+                              borderRadius: '12px', 
+                              fontSize: '12px', 
+                              fontWeight: '600',
+                              textTransform: 'uppercase'
+                            }}>
+                              {payment.status}
+                            </span>
+                          </td>
+                          <td style={{ padding: '16px', color: '#00E5FF', fontSize: '12px', fontFamily: 'monospace' }}>
+                            {payment.tx_hash ? (
+                              <a href={`https://bscscan.com/tx/${payment.tx_hash}`} target="_blank" rel="noopener noreferrer" style={{ color: '#00E5FF', textDecoration: 'none' }}>
+                                {payment.tx_hash.substring(0, 10)}...
+                              </a>
+                            ) : '-'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

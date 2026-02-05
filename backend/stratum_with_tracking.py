@@ -1,7 +1,7 @@
 import asyncio
 import json
 import psycopg2
-from datetime import datetime, timedelta
+from datetime import datetime
 import requests
 import time
 
@@ -37,38 +37,21 @@ def calculate_share_earnings(difficulty, algorithm, coin_price):
     net_usdt = usdt_earned * 0.975
     return net_usdt
 
-def save_share(miner_wallet, algorithm, difficulty, coin_price, net_usdt):
+def save_share(miner_wallet, worker_name, algorithm, difficulty, coin_price, net_usdt):
     conn = get_db()
     cursor = conn.cursor()
     
     cursor.execute("""
         INSERT INTO revenue_snapshots 
-        (miner_wallet, timestamp, algorithm, difficulty, coin_price_usdt, net_usdt_earned, paid)
-        VALUES (%s, %s, %s, %s, %s, %s, FALSE)
-    """, (miner_wallet, datetime.now(), algorithm, int(difficulty), coin_price, net_usdt))
+        (miner_wallet, worker_name, timestamp, algorithm, difficulty, coin_price_usdt, net_usdt_earned, paid)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE)
+    """, (miner_wallet, worker_name, datetime.now(), algorithm, int(difficulty), coin_price, net_usdt))
     
     conn.commit()
     cursor.close()
     conn.close()
     
-    print(f"✅ Share saved: {miner_wallet} earned ${net_usdt:.8f} USDT (XMR: ${coin_price:.2f})")
-
-def update_hashrate(miner_wallet, difficulty, algorithm):
-    """Calculate and store hashrate based on shares"""
-    # Simple hashrate calculation: difficulty / target_time
-    # For RandomX, target time is ~15 seconds
-    hashrate = float(difficulty) / 15.0  # H/s
-    
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    # Store in a simple key-value format (using a new table or Redis in production)
-    # For now, we'll calculate it on-demand from recent shares
-    
-    cursor.close()
-    conn.close()
-    
-    return hashrate
+    print(f"✅ Share saved: {miner_wallet}/{worker_name} earned ${net_usdt:.8f} USDT (XMR: ${coin_price:.2f})")
 
 def get_pool_config(stratum_port):
     conn = get_db()
@@ -96,9 +79,6 @@ def get_pool_config(stratum_port):
         }
     return None
 
-# Track active connections for hashrate
-active_miners = {}
-
 async def handle_miner(reader, writer):
     addr = writer.get_extra_info('peername')
     print(f"INFO: New connection from {addr}")
@@ -118,10 +98,11 @@ async def handle_miner(reader, writer):
     print(f"INFO: Connected to pool: {pool_config['pool_host']}:{pool_config['pool_port']}")
     
     miner_wallet = None
+    worker_name = "worker01"
     last_share_time = time.time()
     
     async def miner_to_pool():
-        nonlocal miner_wallet, last_share_time
+        nonlocal miner_wallet, worker_name, last_share_time
         try:
             while True:
                 data = await reader.read(4096)
@@ -136,17 +117,7 @@ async def handle_miner(reader, writer):
                         login = message['params']['login']
                         miner_wallet = login.split('.')[0]
                         worker_name = login.split('.')[1] if '.' in login else 'worker01'
-                        print(f"INFO: Miner wallet: {miner_wallet}")
-                        
-                        # Track active miner
-                        if miner_wallet not in active_miners:
-                            active_miners[miner_wallet] = {
-                                'workers': set(),
-                                'hashrate': 0,
-                                'last_update': time.time()
-                            }
-                        active_miners[miner_wallet]['workers'].add(worker_name)
-                        
+                        print(f"INFO: Miner wallet: {miner_wallet}, worker: {worker_name}")
                         message['params']['login'] = f"{pool_config['wallet']}.{pool_config['worker']}"
                     
                     if message.get('method') == 'submit':
@@ -155,16 +126,11 @@ async def handle_miner(reader, writer):
                         net_usdt = calculate_share_earnings(difficulty, pool_config['algorithm'], coin_price)
                         
                         if miner_wallet:
-                            save_share(miner_wallet, pool_config['algorithm'], difficulty, coin_price, net_usdt)
+                            save_share(miner_wallet, worker_name, pool_config['algorithm'], difficulty, coin_price, net_usdt)
                             
-                            # Update hashrate
                             current_time = time.time()
                             time_diff = current_time - last_share_time
                             hashrate = difficulty / max(time_diff, 1)
-                            
-                            active_miners[miner_wallet]['hashrate'] = hashrate
-                            active_miners[miner_wallet]['last_update'] = current_time
-                            
                             last_share_time = current_time
                             print(f"⚡ Hashrate: {hashrate:.2f} H/s")
                     
@@ -177,10 +143,6 @@ async def handle_miner(reader, writer):
                     
         except Exception as e:
             print(f"ERROR: Miner to pool: {e}")
-        finally:
-            # Remove from active miners
-            if miner_wallet and miner_wallet in active_miners:
-                del active_miners[miner_wallet]
     
     async def pool_to_miner():
         try:
