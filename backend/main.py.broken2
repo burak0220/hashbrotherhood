@@ -1,0 +1,416 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from datetime import datetime
+
+app = FastAPI(title="HashBrotherhood API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+def get_db():
+    return psycopg2.connect(
+        dbname="hashbrotherhood",
+        user="u0_a307",
+        host="localhost"
+    )
+
+@app.get("/")
+async def root():
+    return {
+        "status": "online",
+        "platform": "HashBrotherhood",
+        "version": "1.0.0",
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.get("/health")
+async def health_check():
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1")
+        cursor.close()
+        conn.close()
+        return {"status": "healthy", "database": "connected"}
+    except:
+        return {"status": "unhealthy", "database": "disconnected"}
+
+@app.get("/api/algorithms")
+async def get_algorithms():
+    conn = get_db()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cursor.execute("""
+        SELECT a.*, p.pool_host, p.pool_port
+        FROM algorithms a
+        LEFT JOIN pool_configs p ON a.id = p.algorithm_id
+        WHERE a.active = TRUE
+        ORDER BY a.id
+    """)
+    
+    algorithms = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    
+    return {"algorithms": algorithms}
+
+@app.get("/api/algorithm/{name}")
+async def get_algorithm(name: str):
+    conn = get_db()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cursor.execute("""
+        SELECT a.*, p.pool_host, p.pool_port
+        FROM algorithms a
+        LEFT JOIN pool_configs p ON a.id = p.algorithm_id
+        WHERE LOWER(a.name) = LOWER(%s) AND a.active = TRUE
+    """, (name,))
+    
+    algo = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    
+    if not algo:
+        return {"error": "Algorithm not found"}
+    
+    return algo
+
+@app.get("/api/miner/{wallet}/balance")
+async def get_miner_balance(wallet: str):
+    conn = get_db()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cursor.execute("""
+        SELECT 
+            COALESCE(SUM(net_usdt_earned), 0) as balance,
+            COUNT(*) as total_shares,
+            MIN(timestamp) as first_share,
+            MAX(timestamp) as last_share
+        FROM revenue_snapshots
+        WHERE miner_wallet = %s AND paid = FALSE
+    """, (wallet,))
+    
+    balance_data = cursor.fetchone()
+    
+    cursor.execute("""
+        SELECT COALESCE(SUM(amount_usdt), 0) as total_paid
+        FROM payments
+        WHERE miner_wallet = %s AND status = 'paid'
+    """, (wallet,))
+    
+    paid_data = cursor.fetchone()
+    
+    cursor.close()
+    conn.close()
+    
+    balance = float(balance_data['balance'] or 0)
+    total_paid = float(paid_data['total_paid'] or 0)
+    total_shares = balance_data['total_shares'] or 0
+    
+    if balance_data['last_share'] and balance_data['first_share']:
+        time_diff = (balance_data['last_share'] - balance_data['first_share']).total_seconds()
+        estimated_daily = balance * (86400 / max(time_diff, 1))
+    else:
+        estimated_daily = 0
+    
+    return {
+        "wallet": wallet,
+        "balance": round(balance, 8),
+        "total_paid": round(total_paid, 2),
+        "total_earned": round(balance + total_paid, 2),
+        "total_shares": total_shares,
+        "estimated_daily": round(estimated_daily, 4),
+        "min_payout": 10.0,
+        "network": "BEP20",
+        "payout_progress": round((balance / 10.0) * 100, 1) if balance < 10 else 100.0
+    }
+
+@app.get("/api/hashrate/{wallet}")
+async def get_miner_hashrate(wallet: str):
+    conn = get_db()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cursor.execute("""
+        SELECT difficulty, timestamp
+        FROM revenue_snapshots
+        WHERE miner_wallet = %s 
+        AND timestamp > NOW() - INTERVAL '5 minutes'
+        ORDER BY timestamp DESC
+    """, (wallet,))
+    
+    shares = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    
+    if not shares or len(shares) < 2:
+        return {"wallet": wallet, "hashrate": 0, "unit": "H/s"}
+    
+    total_difficulty = sum(float(s['difficulty']) for s in shares)
+    time_span = (shares[0]['timestamp'] - shares[-1]['timestamp']).total_seconds()
+    
+    if time_span > 0:
+        hashrate = total_difficulty / time_span
+    else:
+        hashrate = 0
+    
+    return {
+        "wallet": wallet,
+        "hashrate": round(hashrate, 2),
+        "unit": "H/s",
+        "shares_count": len(shares)
+    }
+
+@app.get("/api/workers/{wallet}")
+async def get_active_workers(wallet: str):
+    conn = get_db()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cursor.execute("""
+        SELECT 
+            worker_name,
+            COUNT(*) as shares,
+            MAX(timestamp) as last_share,
+            SUM(difficulty) as total_difficulty
+        FROM revenue_snapshots
+        WHERE miner_wallet = %s 
+        AND timestamp > NOW() - INTERVAL '10 minutes'
+        AND worker_name IS NOT NULL
+        GROUP BY worker_name
+        ORDER BY last_share DESC
+    """, (wallet,))
+    
+    workers = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    
+    active_count = len([w for w in workers if w['last_share'] and (datetime.now() - w['last_share']).seconds < 300])
+    
+    return {
+        "wallet": wallet,
+        "active_workers": active_count,
+        "total_workers": len(workers),
+        "workers": workers
+    }
+
+@app.get("/api/payments/{wallet}")
+async def get_payments(wallet: str):
+    conn = get_db()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cursor.execute("""
+        SELECT id, amount_usdt, status, tx_hash, created_at, paid_at
+        FROM payments
+        WHERE miner_wallet = %s
+        ORDER BY created_at DESC
+        LIMIT 50
+    """, (wallet,))
+    
+    payments = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    
+    return {"payments": payments}
+
+@app.get("/api/miner/{wallet}")
+async def get_miner_stats(wallet: str):
+    return {
+        "wallet": wallet,
+        "balance": 0.0,
+        "hashrate": 0,
+        "workers": 0,
+        "estimated_daily": 0.0,
+        "min_payout": 10.0,
+        "network": "BEP20"
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+@app.get("/api/calculator/{algorithm}")
+async def get_calculator_data(algorithm: str):
+    """Get real network data for calculator"""
+    import requests
+    
+    # Coin mapping
+    coin_map = {
+        'randomx': {'coin': 'XMR', 'coingecko': 'monero'},
+        'kawpow': {'coin': 'RVN', 'coingecko': 'ravencoin'},
+        'ethash': {'coin': 'ETC', 'coingecko': 'ethereum-classic'},
+        'scrypt': {'coin': 'LTC', 'coingecko': 'litecoin'},
+        'sha256': {'coin': 'BTC', 'coingecko': 'bitcoin'},
+        'autolykos': {'coin': 'ERG', 'coingecko': 'ergo'}
+    }
+    
+    algo_lower = algorithm.lower()
+    if algo_lower not in coin_map:
+        return {"error": "Unknown algorithm"}
+    
+    coin_info = coin_map[algo_lower]
+    
+    # Get price from CoinGecko
+    try:
+        price_res = requests.get(
+            f"https://api.coingecko.com/api/v3/simple/price?ids={coin_info['coingecko']}&vs_currencies=usd",
+            timeout=5
+        )
+        price_data = price_res.json()
+        coin_price = price_data[coin_info['coingecko']]['usd']
+    except:
+        coin_price = 0
+    
+    # Conservative network estimates (70% of actual to avoid overpromising)
+    network_data = {
+        'randomx': {
+            'network_hashrate': 2500000000,  # 2.5 GH/s
+            'block_reward': 0.6,
+            'block_time': 120
+        },
+        'kawpow': {
+            'network_hashrate': 5000000000000,  # 5 TH/s
+            'block_reward': 2500,
+            'block_time': 60
+        },
+        'ethash': {
+            'network_hashrate': 180000000000000,  # 180 TH/s
+            'block_reward': 2.56,
+            'block_time': 13
+        },
+        'scrypt': {
+            'network_hashrate': 700000000000000,  # 700 TH/s
+            'block_reward': 12.5,
+            'block_time': 150
+        },
+        'sha256': {
+            'network_hashrate': 500000000000000000,  # 500 EH/s
+            'block_reward': 6.25,
+            'block_time': 600
+        },
+        'autolykos': {
+            'network_hashrate': 50000000000000,  # 50 TH/s
+            'block_reward': 67.5,
+            'block_time': 120
+        }
+    }
+    
+    return {
+        "algorithm": algorithm,
+        "coin": coin_info['coin'],
+        "coin_price": coin_price,
+        "network_hashrate": network_data[algo_lower]['network_hashrate'],
+        "block_reward": network_data[algo_lower]['block_reward'],
+        "block_time": network_data[algo_lower]['block_time'],
+        "platform_fee": 0.025,  # 2.5%
+        "source": "CoinGecko + Conservative Estimates"
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+@app.get("/api/calculator/realtime")
+async def calculate_realtime(algorithm: str, hashrate: float, unit: str):
+    """Real-time mining calculator with live network data"""
+    import requests
+    
+    # Coin mapping for MiningPoolStats
+    coin_map = {
+        'RandomX': 'monero',
+        'KawPow': 'ravencoin', 
+        'Ethash': 'ethereum-classic',
+        'Scrypt': 'litecoin',
+        'SHA256': 'bitcoin',
+        'Autolykos': 'ergo'
+    }
+    
+    coin = coin_map.get(algorithm)
+    if not coin:
+        return {"error": "Unknown algorithm"}
+    
+    # Fetch live data from MiningPoolStats
+    try:
+        res = requests.get(f"https://miningpoolstats.stream/{coin}", timeout=5)
+        data = res.json()
+        
+        network_hashrate = float(data.get('network_hashrate', 0))
+        block_reward = float(data.get('block_reward', 0))
+        block_time = float(data.get('block_time', 60))
+        coin_price = float(data.get('price', 0))
+        
+        if network_hashrate == 0 or coin_price == 0:
+            raise Exception("Invalid data")
+            
+    except Exception as e:
+        # Fallback to CoinGecko for price only
+        coin_gecko_map = {
+            'monero': 'monero', 'ravencoin': 'ravencoin',
+            'ethereum-classic': 'ethereum-classic', 'litecoin': 'litecoin',
+            'bitcoin': 'bitcoin', 'ergo': 'ergo'
+        }
+        
+        try:
+            price_res = requests.get(
+                f"https://api.coingecko.com/api/v3/simple/price?ids={coin_gecko_map[coin]}&vs_currencies=usd",
+                timeout=5
+            )
+            coin_price = price_res.json()[coin_gecko_map[coin]]['usd']
+        except:
+            return {"error": "Could not fetch price data"}
+        
+        # Fallback network data (conservative)
+        fallback_data = {
+            'monero': {'hashrate': 2800000000, 'reward': 0.6, 'blocktime': 120},
+            'ravencoin': {'hashrate': 6000000000000, 'reward': 2500, 'blocktime': 60},
+            'ethereum-classic': {'hashrate': 200000000000000, 'reward': 2.56, 'blocktime': 13},
+            'litecoin': {'hashrate': 800000000000000, 'reward': 12.5, 'blocktime': 150},
+            'bitcoin': {'hashrate': 600000000000000000, 'reward': 3.125, 'blocktime': 600},
+            'ergo': {'hashrate': 60000000000000, 'reward': 67.5, 'blocktime': 120}
+        }
+        
+        network_hashrate = fallback_data[coin]['hashrate']
+        block_reward = fallback_data[coin]['reward']
+        block_time = fallback_data[coin]['blocktime']
+    
+    # Convert hashrate to H/s
+    multipliers = {
+        'H/s': 1,
+        'KH/s': 1000,
+        'MH/s': 1000000,
+        'GH/s': 1000000000,
+        'TH/s': 1000000000000,
+        'PH/s': 1000000000000000,
+        'EH/s': 1000000000000000000
+    }
+    
+    user_hashrate_hs = hashrate * multipliers.get(unit, 1)
+    
+    # Calculate earnings
+    blocks_per_day = 86400 / block_time
+    user_share = user_hashrate_hs / network_hashrate
+    daily_coins = blocks_per_day * block_reward * user_share
+    
+    # Convert to USDT with hidden 2.5% platform fee
+    gross_usdt = daily_coins * coin_price
+    net_usdt = gross_usdt * 0.975
+    
+    return {
+        "hourly": round(net_usdt / 24, 6),
+        "daily": round(net_usdt, 4),
+        "weekly": round(net_usdt * 7, 2),
+        "monthly": round(net_usdt * 30, 2),
+        "coin_price": round(coin_price, 4),
+        "coins_per_day": round(daily_coins, 8),
+        "network_hashrate": network_hashrate,
+        "estimated": True
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
