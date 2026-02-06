@@ -74,29 +74,49 @@ async def shutdown_event():
         db_pool.closeall()
         print("✅ Database pool closed")
 
-# ============================================================
-# NETWORK DATA CACHE (avoid hitting APIs too often)
-# ============================================================
-NETWORK_CACHE: Dict[str, tuple] = {}
-NETWORK_CACHE_DURATION = 300  # 5 minutes
+# 2MINERS ENDPOINTS
+TWOMINERS_POOLS = {
+    'RVN': 'https://rvn.2miners.com/api/stats',
+    'ETC': 'https://etc.2miners.com/api/stats',
+    'LTC': 'https://ltc.2miners.com/api/stats'
+}
 
-# ============================================================
+# CONSERVATIVE FALLBACK
+FALLBACK_NETWORK = {
+    'XMR': {
+        'hashrate': 2_280_000_000,
+        'block_reward': 0.6,
+        'block_time': 120
+    },
+    'BTC': {
+        'hashrate': 496_000_000_000_000_000_000,
+        'block_reward': 3.125,
+        'block_time': 600
+    },
+    'ERG': {
+        'hashrate': 49_600_000_000_000,
+        'block_reward': 67.5,
+        'block_time': 120
+    },
+    'LTC': {
+        'hashrate': 680_000_000_000_000,
+        'block_reward': 12.5,
+        'block_time': 150
+    }
+}
+
 # PRICE CACHE
-# ============================================================
 PRICE_CACHE: Dict[str, tuple] = {}
 CACHE_DURATION = int(os.getenv("PRICE_CACHE_SECONDS", "60"))
 
-# ============================================================
-# COIN PRICE FETCHER (Multi-source with caching)
-# ============================================================
 def get_coin_price(coin_symbol: str) -> float:
     """Multi-source price fetcher with caching"""
-
+    
     if coin_symbol in PRICE_CACHE:
         cached_price, cached_time = PRICE_CACHE[coin_symbol]
         if time.time() - cached_time < CACHE_DURATION:
             return cached_price
-
+    
     coin_map = {
         'XMR': 'monero',
         'RVN': 'ravencoin',
@@ -105,35 +125,24 @@ def get_coin_price(coin_symbol: str) -> float:
         'BTC': 'bitcoin',
         'ERG': 'ergo'
     }
-
-    coingecko_ids = {
-        'XMR': 'monero',
-        'RVN': 'ravencoin',
-        'ETC': 'ethereum-classic',
-        'LTC': 'litecoin',
-        'BTC': 'bitcoin',
-        'ERG': 'ergo'
-    }
-
+    
     coin_id = coin_map.get(coin_symbol, 'bitcoin')
     price = 0
-
-    # 1. CoinGecko (most reliable)
+    
+    # 1. CoinCap
     try:
-        cg_id = coingecko_ids.get(coin_symbol)
-        if cg_id:
-            url = f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd"
-            response = requests.get(url, timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                price = float(data.get(cg_id, {}).get('usd', 0))
-                if price > 0:
-                    PRICE_CACHE[coin_symbol] = (price, time.time())
-                    print(f"✅ CoinGecko: {coin_symbol} = ${price:.4f}")
-                    return price
+        url = f"https://api.coincap.io/v2/assets/{coin_id}"
+        response = requests.get(url, timeout=3)
+        if response.status_code == 200:
+            data = response.json()
+            price = float(data['data']['priceUsd'])
+            if price > 0:
+                PRICE_CACHE[coin_symbol] = (price, time.time())
+                print(f"✅ CoinCap: {coin_symbol} = ${price:.2f}")
+                return price
     except Exception as e:
-        print(f"⚠️ CoinGecko failed: {e}")
-
+        print(f"⚠️ CoinCap failed: {e}")
+    
     # 2. CryptoCompare
     try:
         url = f"https://min-api.cryptocompare.com/data/price?fsym={coin_symbol}&tsyms=USD"
@@ -143,26 +152,12 @@ def get_coin_price(coin_symbol: str) -> float:
             price = float(data.get('USD', 0))
             if price > 0:
                 PRICE_CACHE[coin_symbol] = (price, time.time())
-                print(f"✅ CryptoCompare: {coin_symbol} = ${price:.4f}")
+                print(f"✅ CryptoCompare: {coin_symbol} = ${price:.2f}")
                 return price
     except Exception as e:
         print(f"⚠️ CryptoCompare failed: {e}")
-
-    # 3. CoinCap
-    try:
-        url = f"https://api.coincap.io/v2/assets/{coin_id}"
-        response = requests.get(url, timeout=3)
-        if response.status_code == 200:
-            data = response.json()
-            price = float(data['data']['priceUsd'])
-            if price > 0:
-                PRICE_CACHE[coin_symbol] = (price, time.time())
-                print(f"✅ CoinCap: {coin_symbol} = ${price:.4f}")
-                return price
-    except Exception as e:
-        print(f"⚠️ CoinCap failed: {e}")
-
-    # 4. Fallback (should rarely reach here)
+    
+    # 3. Fallback
     fallback_prices = {
         'XMR': 165.0,
         'BTC': 70000.0,
@@ -172,235 +167,47 @@ def get_coin_price(coin_symbol: str) -> float:
         'ERG': 1.5
     }
     price = fallback_prices.get(coin_symbol, 100.0)
-    print(f"⚠️ Using fallback price: {coin_symbol} = ${price:.4f}")
+    print(f"⚠️ Using fallback: {coin_symbol} = ${price:.2f}")
     return price
 
-
-# ============================================================
-# NETWORK DATA FETCHER (Real-time from multiple APIs)
-# ============================================================
 def get_network_data(coin_symbol):
-    """Fetch REAL network data from blockchain APIs"""
-
-    # Check cache first
-    if coin_symbol in NETWORK_CACHE:
-        cached_data, cached_time = NETWORK_CACHE[coin_symbol]
-        if time.time() - cached_time < NETWORK_CACHE_DURATION:
-            return cached_data
-
-    result = None
-
-    if coin_symbol == 'BTC':
-        result = _get_btc_network()
-    elif coin_symbol == 'XMR':
-        result = _get_xmr_network()
-    elif coin_symbol == 'ERG':
-        result = _get_ergo_network()
-    elif coin_symbol == 'RVN':
-        result = _get_2miners_network('RVN', 'https://rvn.2miners.com/api/stats', 2500)
-    elif coin_symbol == 'ETC':
-        result = _get_2miners_network('ETC', 'https://etc.2miners.com/api/stats', 2.56)
-    elif coin_symbol == 'LTC':
-        result = _get_2miners_network('LTC', 'https://ltc.2miners.com/api/stats', 6.25)
-
-    # If API failed, use conservative fallback
-    if not result:
-        result = _get_fallback_network(coin_symbol)
-
-    # Cache the result
-    if result:
-        NETWORK_CACHE[coin_symbol] = (result, time.time())
-
-    return result
-
-
-def _get_btc_network():
-    """Bitcoin network data from blockchain.info + mempool.space"""
-
-    # Try mempool.space first (more reliable)
-    try:
-        # Get difficulty
-        res = requests.get("https://mempool.space/api/v1/mining/hashrate/1d", timeout=5)
-        if res.status_code == 200:
+    """Fetch network data from 2Miners or fallback"""
+    
+    pool_url = TWOMINERS_POOLS.get(coin_symbol)
+    if pool_url:
+        try:
+            res = requests.get(pool_url, timeout=5)
             data = res.json()
-            if data.get('hashrates') and len(data['hashrates']) > 0:
-                network_hashrate = float(data['hashrates'][-1]['avgHashrate'])
-                return {
-                    'hashrate': network_hashrate,
-                    'block_reward': 3.125,
-                    'block_time': 600,
-                    'source': 'Mempool.space'
-                }
-    except Exception as e:
-        print(f"⚠️ Mempool.space failed: {e}")
-
-    # Fallback: blockchain.info
-    try:
-        hashrate_res = requests.get("https://blockchain.info/q/hashrate", timeout=5)
-        if hashrate_res.status_code == 200:
-            # blockchain.info returns hashrate in GH/s
-            hashrate_ghs = float(hashrate_res.text.strip())
-            network_hashrate = hashrate_ghs * 1_000_000_000  # Convert to H/s
-            return {
-                'hashrate': network_hashrate,
-                'block_reward': 3.125,
-                'block_time': 600,
-                'source': 'Blockchain.info'
-            }
-    except Exception as e:
-        print(f"⚠️ Blockchain.info failed: {e}")
-
-    return None
-
-
-def _get_xmr_network():
-    """Monero network data from localmonero API / moneroblocks"""
-
-    # Try moneroblocks.info
-    try:
-        res = requests.get("https://moneroblocks.info/api/get_stats", timeout=5)
-        if res.status_code == 200:
-            data = res.json()
-            network_hashrate = float(data.get('hashrate', 0))
-            last_reward = float(data.get('last_reward', 600000000)) / 1e12  # piconero to XMR
-            return {
-                'hashrate': network_hashrate,
-                'block_reward': last_reward,
-                'block_time': 120,
-                'source': 'MoneroBlocks'
-            }
-    except Exception as e:
-        print(f"⚠️ MoneroBlocks failed: {e}")
-
-    # Try xmrchain.net
-    try:
-        res = requests.get("https://xmrchain.net/api/networkinfo", timeout=5)
-        if res.status_code == 200:
-            data = res.json()
-            d = data.get('data', {})
-            network_hashrate = float(d.get('hash_rate', 0))
-            return {
-                'hashrate': network_hashrate,
-                'block_reward': 0.6,  # approximate tail emission
-                'block_time': 120,
-                'source': 'XMRChain'
-            }
-    except Exception as e:
-        print(f"⚠️ XMRChain failed: {e}")
-
-    return None
-
-
-def _get_ergo_network():
-    """Ergo network data from ergo blocks API"""
-    try:
-        res = requests.get("https://api.ergoplatform.com/api/v1/blocks?limit=1", timeout=5)
-        if res.status_code == 200:
-            data = res.json()
-            items = data.get('items', [])
-            if items and len(items) > 0:
-                block = items[0]
-                difficulty = float(block.get('difficulty', 0))
-                miner_reward_nano = float(block.get('minerReward', 0))
-                block_reward = miner_reward_nano / 1_000_000_000
-                block_time = 120
-                network_hashrate = difficulty / block_time
+            nodes = data.get('nodes', [])
+            if nodes and len(nodes) > 0:
+                node = nodes[0]
+                network_hashrate = float(node.get('networkhashps', 0))
+                block_time = float(node.get('avgBlockTime', 60))
+                block_rewards = {'RVN': 2500, 'ETC': 2.56, 'LTC': 12.5}
+                block_reward = block_rewards.get(coin_symbol, 0)
+                
                 if network_hashrate > 0 and block_reward > 0:
-                    print(f"✅ Ergo: hashrate={network_hashrate:.0f} H/s, reward={block_reward} ERG")
                     return {
                         'hashrate': network_hashrate,
                         'block_reward': block_reward,
                         'block_time': block_time,
-                        'source': 'ErgoPlatform'
+                        'source': '2Miners'
                     }
-    except Exception as e:
-        print(f"⚠️ ErgoPlatform failed: {e}")
+        except:
+            pass
+    
+    fallback = FALLBACK_NETWORK.get(coin_symbol)
+    if fallback:
+        return {**fallback, 'source': 'Conservative'}
+    
     return None
-
-
-def _get_2miners_network(coin_symbol, pool_url, block_reward):
-    """Fetch network data from 2Miners pool API"""
-
-    try:
-        res = requests.get(pool_url, timeout=5)
-        data = res.json()
-        nodes = data.get('nodes', [])
-        if nodes and len(nodes) > 0:
-            node = nodes[0]
-            network_hashrate = float(node.get('networkhashps', 0))
-            block_time = float(node.get('avgBlockTime', 60))
-
-            if network_hashrate > 0:
-                return {
-                    'hashrate': network_hashrate,
-                    'block_reward': block_reward,
-                    'block_time': block_time,
-                    'source': '2Miners'
-                }
-    except Exception as e:
-        print(f"⚠️ 2Miners {coin_symbol} failed: {e}")
-
-    return None
-
-
-def _get_fallback_network(coin_symbol):
-    """Conservative fallback values - LAST RESORT"""
-
-    fallback = {
-        'XMR': {
-            'hashrate': 2_800_000_000,       # ~2.8 GH/s
-            'block_reward': 0.6,
-            'block_time': 120,
-            'source': 'Fallback (may be inaccurate)'
-        },
-        'BTC': {
-            'hashrate': 750_000_000_000_000_000_000,  # ~750 EH/s (2025 estimate)
-            'block_reward': 3.125,
-            'block_time': 600,
-            'source': 'Fallback (may be inaccurate)'
-        },
-        'ERG': {
-            'hashrate': 30_000_000_000_000,   # ~30 TH/s
-            'block_reward': 3.0,
-            'block_time': 120,
-            'source': 'Fallback (may be inaccurate)'
-        },
-        'RVN': {
-            'hashrate': 5_500_000_000_000,    # ~5.5 TH/s
-            'block_reward': 2500,
-            'block_time': 60,
-            'source': 'Fallback (may be inaccurate)'
-        },
-        'ETC': {
-            'hashrate': 200_000_000_000_000,  # ~200 TH/s
-            'block_reward': 2.56,
-            'block_time': 13,
-            'source': 'Fallback (may be inaccurate)'
-        },
-        'LTC': {
-            'hashrate': 1_500_000_000_000_000, # ~1.5 PH/s
-            'block_reward': 6.25,
-            'block_time': 150,
-            'source': 'Fallback (may be inaccurate)'
-        }
-    }
-
-    result = fallback.get(coin_symbol)
-    if result:
-        print(f"⚠️ Using fallback network data for {coin_symbol}")
-    return result
-
-
-# ============================================================
-# API ENDPOINTS
-# ============================================================
 
 @app.get("/")
 async def root():
     return {
         "status": "online",
         "platform": "HashBrotherhood",
-        "version": "1.1.0",
+        "version": "1.0.2",
         "timestamp": datetime.now().isoformat()
     }
 
@@ -420,7 +227,7 @@ async def health_check():
 async def get_algorithms():
     conn = get_db()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-
+    
     cursor.execute("""
         SELECT a.*, p.pool_host, p.pool_port
         FROM algorithms a
@@ -428,38 +235,38 @@ async def get_algorithms():
         WHERE a.active = TRUE
         ORDER BY a.id
     """)
-
+    
     algorithms = cursor.fetchall()
     cursor.close()
     return_db(conn)
-
+    
     return {"algorithms": algorithms}
 
 @app.get("/api/algorithm/{name}")
 async def get_algorithm(name: str):
     conn = get_db()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-
+    
     cursor.execute("""
         SELECT a.*, p.pool_host, p.pool_port
         FROM algorithms a
         LEFT JOIN pool_configs p ON a.id = p.algorithm_id
         WHERE LOWER(a.name) = LOWER(%s) AND a.active = TRUE
     """, (name,))
-
+    
     algo = cursor.fetchone()
     cursor.close()
     return_db(conn)
-
+    
     if not algo:
         return {"error": "Algorithm not found"}
-
+    
     return algo
 
 @app.get("/api/coin-info/{algorithm}")
 async def get_coin_info(algorithm: str):
     """Get coin info with logo and live price"""
-
+    
     coin_data = {
         'RandomX': {
             'symbol': 'XMR',
@@ -498,13 +305,13 @@ async def get_coin_info(algorithm: str):
             'binance_symbol': None
         }
     }
-
+    
     info = coin_data.get(algorithm)
     if not info:
         return {"error": "Unknown algorithm"}
-
+    
     price = get_coin_price(info['symbol'])
-
+    
     return {
         **info,
         'price': price
@@ -512,11 +319,11 @@ async def get_coin_info(algorithm: str):
 
 @app.get("/api/calculator/realtime")
 async def calculate_realtime(algorithm: str, hashrate: float, unit: str):
-    """Mining calculator with REAL live data"""
-
+    """Mining calculator with live data"""
+    
     if hashrate <= 0:
         return {"error": "Hashrate must be positive"}
-
+    
     coin_map = {
         'RandomX': 'XMR',
         'KawPow': 'RVN',
@@ -525,20 +332,20 @@ async def calculate_realtime(algorithm: str, hashrate: float, unit: str):
         'SHA256': 'BTC',
         'Autolykos': 'ERG'
     }
-
+    
     coin_symbol = coin_map.get(algorithm)
     if not coin_symbol:
         return {"error": "Unknown algorithm"}
-
+    
     network = get_network_data(coin_symbol)
     if not network:
         return {"error": "Network data not available"}
-
+    
     coin_price = get_coin_price(coin_symbol)
-
+    
     if coin_price == 0:
         return {"error": "Could not fetch price"}
-
+    
     multipliers = {
         'H/s': 1,
         'KH/s': 1000,
@@ -548,17 +355,17 @@ async def calculate_realtime(algorithm: str, hashrate: float, unit: str):
         'PH/s': 1000000000000000,
         'EH/s': 1000000000000000000
     }
-
+    
     user_hashrate_hs = hashrate * multipliers.get(unit, 1)
-
+    
     blocks_per_day = 86400 / network['block_time']
     user_share = user_hashrate_hs / network['hashrate']
     daily_coins = blocks_per_day * network['block_reward'] * user_share
-
+    
     fee = float(os.getenv("PLATFORM_FEE_PERCENT", "2.5")) / 100
     gross_usdt = daily_coins * coin_price
     net_usdt = gross_usdt * (1 - fee)
-
+    
     return {
         "hourly": round(net_usdt / 24, 6),
         "daily": round(net_usdt, 4),
@@ -575,12 +382,12 @@ async def calculate_realtime(algorithm: str, hashrate: float, unit: str):
 async def get_miner_balance(wallet: str):
     if len(wallet) < 26:
         return {"error": "Invalid wallet address"}
-
+    
     conn = get_db()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-
+    
     cursor.execute("""
-        SELECT
+        SELECT 
             COALESCE(SUM(net_usdt_earned), 0) as balance,
             COUNT(*) as total_shares,
             MIN(timestamp) as first_share,
@@ -588,32 +395,32 @@ async def get_miner_balance(wallet: str):
         FROM revenue_snapshots
         WHERE miner_wallet = %s AND paid = FALSE
     """, (wallet,))
-
+    
     balance_data = cursor.fetchone()
-
+    
     cursor.execute("""
         SELECT COALESCE(SUM(amount_usdt), 0) as total_paid
         FROM payments
         WHERE miner_wallet = %s AND status = 'paid'
     """, (wallet,))
-
+    
     paid_data = cursor.fetchone()
-
+    
     cursor.close()
     return_db(conn)
-
+    
     balance = float(balance_data['balance'] or 0)
     total_paid = float(paid_data['total_paid'] or 0)
     total_shares = balance_data['total_shares'] or 0
-
+    
     if balance_data['last_share'] and balance_data['first_share']:
         time_diff = (balance_data['last_share'] - balance_data['first_share']).total_seconds()
         estimated_daily = balance * (86400 / max(time_diff, 1))
     else:
         estimated_daily = 0
-
+    
     min_payout = float(os.getenv("MIN_PAYOUT_USDT", "10.0"))
-
+    
     return {
         "wallet": wallet,
         "balance": round(balance, 8),
@@ -630,30 +437,30 @@ async def get_miner_balance(wallet: str):
 async def get_miner_hashrate(wallet: str):
     conn = get_db()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-
+    
     cursor.execute("""
         SELECT difficulty, timestamp
         FROM revenue_snapshots
-        WHERE miner_wallet = %s
+        WHERE miner_wallet = %s 
         AND timestamp > NOW() - INTERVAL '5 minutes'
         ORDER BY timestamp DESC
     """, (wallet,))
-
+    
     shares = cursor.fetchall()
     cursor.close()
     return_db(conn)
-
+    
     if not shares or len(shares) < 2:
         return {"wallet": wallet, "hashrate": 0, "unit": "H/s"}
-
+    
     total_difficulty = sum(float(s['difficulty']) for s in shares)
     time_span = (shares[0]['timestamp'] - shares[-1]['timestamp']).total_seconds()
-
+    
     if time_span > 0:
         hashrate = total_difficulty / time_span
     else:
         hashrate = 0
-
+    
     return {
         "wallet": wallet,
         "hashrate": round(hashrate, 2),
@@ -665,27 +472,27 @@ async def get_miner_hashrate(wallet: str):
 async def get_active_workers(wallet: str):
     conn = get_db()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-
+    
     cursor.execute("""
-        SELECT
+        SELECT 
             worker_name,
             COUNT(*) as shares,
             MAX(timestamp) as last_share,
             SUM(difficulty) as total_difficulty
         FROM revenue_snapshots
-        WHERE miner_wallet = %s
+        WHERE miner_wallet = %s 
         AND timestamp > NOW() - INTERVAL '10 minutes'
         AND worker_name IS NOT NULL
         GROUP BY worker_name
         ORDER BY last_share DESC
     """, (wallet,))
-
+    
     workers = cursor.fetchall()
     cursor.close()
     return_db(conn)
-
+    
     active_count = len([w for w in workers if w['last_share'] and (datetime.now() - w['last_share']).seconds < 300])
-
+    
     return {
         "wallet": wallet,
         "active_workers": active_count,
@@ -697,7 +504,7 @@ async def get_active_workers(wallet: str):
 async def get_payments(wallet: str):
     conn = get_db()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-
+    
     cursor.execute("""
         SELECT id, amount_usdt, status, tx_hash, created_at, paid_at
         FROM payments
@@ -705,11 +512,11 @@ async def get_payments(wallet: str):
         ORDER BY created_at DESC
         LIMIT 50
     """, (wallet,))
-
+    
     payments = cursor.fetchall()
     cursor.close()
     return_db(conn)
-
+    
     return {"payments": payments}
 
 @app.get("/api/miner/{wallet}")
@@ -727,7 +534,7 @@ async def get_miner_stats(wallet: str):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
-        app,
-        host=os.getenv("API_HOST", "0.0.0.0"),
+        app, 
+        host=os.getenv("API_HOST", "0.0.0.0"), 
         port=int(os.getenv("API_PORT", "8000"))
     )
